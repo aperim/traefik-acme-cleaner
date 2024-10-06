@@ -1,0 +1,182 @@
+# .github/workflows/build_and_publish.yml
+name: Build and Publish Containers
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - .devcontainer/**
+      - .github/**
+      - .vscode/**
+  push:
+    branches: [main]
+    paths-ignore:
+      - .devcontainer/**
+      - .github/**
+      - .vscode/**
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version_major: [3]
+        version_minor: [20]
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
+      attestations: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for versioning and labels
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get Current Timestamp
+        id: get_timestamp
+        run: echo "::set-output name=build_timestamp::$(date +%s)"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Build Variables
+        id: vars
+        env:
+          PYTHON_MAJOR_VERSION: ${{ matrix.version_major }}
+          PYTHON_MINOR_VERSION: ${{ matrix.version_minor }}
+          GITHUB_OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "Setting up build variables..."
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          COMMIT_SHA="${{ github.sha }}"
+          REPO_URL="${{ github.repositoryUrl }}"
+          echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
+          echo "COMMIT_SHA=${COMMIT_SHA}" >> $GITHUB_ENV
+          echo "REPO_URL=${REPO_URL}" >> $GITHUB_ENV
+
+          # Determine VERSION and TAG_LIST
+          echo "Determining version and tags..."
+          TAG_LIST=()
+
+          PYTHON_VERSION="${PYTHON_MAJOR_VERSION}.${PYTHON_MINOR_VERSION}"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            echo "Event is a release"
+            RELEASE_VERSION="${{ github.event.release.tag_name }}"
+            # Extract semver components from RELEASE_VERSION
+            IFS='.' read -ra VER_COMPONENTS <<< "$RELEASE_VERSION"
+            REL_MAJOR="${VER_COMPONENTS[0]}"
+            REL_MINOR="${VER_COMPONENTS[1]}"
+            REL_PATCH="${VER_COMPONENTS[2]}"
+
+            # Build tag list
+            TAG_LIST+=("${PYTHON_VERSION}")
+
+            if [[ -n "${REL_MAJOR}" ]]; then
+              TAG_LIST+=("${PYTHON_VERSION}-${REL_MAJOR}")
+            fi
+            if [[ -n "${REL_MAJOR}" && -n "${REL_MINOR}" ]]; then
+              TAG_LIST+=("${PYTHON_VERSION}-${REL_MAJOR}.${REL_MINOR}")
+            fi
+            if [[ -n "${REL_MAJOR}" && -n "${REL_MINOR}" && -n "${REL_PATCH}" ]]; then
+              TAG_LIST+=("${PYTHON_VERSION}-${REL_MAJOR}.${REL_MINOR}.${REL_PATCH}")
+            fi
+
+            # For latest Cleanup script python version, add "latest" tag
+            if [[ "${PYTHON_MAJOR_VERSION}" == "3" && "${PYTHON_MINOR_VERSION}" == "20" ]]; then
+              TAG_LIST+=("latest")
+            fi
+
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            echo "On main branch"
+            VERSION="edge"
+            TAG_LIST+=("${PYTHON_VERSION}-edge")
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            PR_BRANCH="${GITHUB_HEAD_REF}"
+            echo "Pull request from branch ${PR_BRANCH}"
+            VERSION="${PR_BRANCH}"
+            TAG_LIST+=("${PYTHON_VERSION}-${PR_BRANCH}")
+          elif [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
+            BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+            echo "On branch ${BRANCH_NAME}"
+            VERSION="${BRANCH_NAME}"
+            TAG_LIST+=("${PYTHON_VERSION}-${BRANCH_NAME}")
+          else
+            echo "Event not matched, defaulting to 'dev'"
+            VERSION="dev"
+            TAG_LIST+=("${PYTHON_VERSION}-dev")
+          fi
+
+          # Remove duplicates from TAG_LIST
+          TAG_LIST=($(printf "%s\n" "${TAG_LIST[@]}" | sort -u))
+
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+          CLEANUP_IMAGE_NAME="ghcr.io/${GITHUB_OWNER}/traefik-acme-cleanup"
+
+          echo "CLEANUP_IMAGE_NAME=${CLEANUP_IMAGE_NAME}" >> $GITHUB_ENV
+
+          CLEANUP_IMAGE_TAGS=""
+
+          for TAG in "${TAG_LIST[@]}"; do
+            CLEANUP_IMAGE_TAGS+="${CLEANUP_IMAGE_NAME}:${TAG}\n"
+          done
+
+          echo "CLEANUP_IMAGE_TAGS<<EOF" >> $GITHUB_OUTPUT
+          echo -e "${CLEANUP_IMAGE_TAGS}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build and Push Cleanup Container
+        id: cleanup_push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.CLEANUP_IMAGE_TAGS }}
+          build-args: |
+            PYTHON_MAJOR_VERSION=${{ matrix.version_major }}
+            PYTHON_MINOR_VERSION=${{ matrix.version_minor }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+            VCS_REF=${{ env.COMMIT_SHA }}
+            VERSION=${{ env.VERSION }}
+            REPO_URL=${{ env.REPO_URL }}
+            BUILD_TIMESTAMP=${{ steps.get_timestamp.outputs.build_timestamp }}
+          labels: |
+            org.opencontainers.image.created=${{ env.BUILD_DATE }}
+            org.opencontainers.image.url=${{ env.REPO_URL }}
+            org.opencontainers.image.source=${{ env.REPO_URL }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.COMMIT_SHA }}
+            org.opencontainers.image.vendor="${{ github.repository_owner }}"
+            org.opencontainers.image.title="Traefik acme.json cleanup"
+            org.opencontainers.image.description="Traefik acme.json cleanup for Python ${{ matrix.version_major }}.${{ matrix.version_minor }}"
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest Cleanup Container
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.CLEANUP_IMAGE_NAME }}
+          subject-digest: ${{ steps.cleanup_push.outputs.digest }}
+          push-to-registry: true

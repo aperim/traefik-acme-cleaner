@@ -1,0 +1,32 @@
+services:
+  acme-cleanup:
+    image: ghcr.io/aperim/traefik-acme-cleanup:latest
+    volumes:
+      - traefik-public-certificates:/certificates
+    environment:
+      - TRAEFIK_DASHBOARD_URL
+      - TRAEFIK_DASHBOARD_USERNAME
+      - TRAEFIK_DASHBOARD_PASSWORD
+      - ACME_CLEANUP_UNUSED
+      - ACME_CLEANUP_DOIT
+      - TRAEFIK_ACME_FILE=${TRAEFIK_ACME_FILE:-/certificates/acme.json}
+      - CLEANUP_REPORT=${CLEANUP_REPORT:-/certificates/REPORT.md}
+    deploy:
+      mode: global
+      restart_policy:
+        delay: 24h
+      placement:
+        constraints:
+          - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+
+volumes:
+  traefik-public-certificates:
+    driver: glusterfs
+    name: ${GLUSTER_PUBLIC_CERTIFICATES}
