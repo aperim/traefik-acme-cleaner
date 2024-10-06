@@ -9,6 +9,8 @@ services:
       - TRAEFIK_DASHBOARD_PASSWORD
       - ACME_CLEANUP_UNUSED
       - ACME_CLEANUP_DOIT
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
       - TRAEFIK_ACME_FILE=${TRAEFIK_ACME_FILE:-/certificates/acme.json}
       - CLEANUP_REPORT=${CLEANUP_REPORT:-/certificates/REPORT.md}
     deploy:
