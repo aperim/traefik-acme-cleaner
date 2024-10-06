@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Traefik API Interaction Module.
 
@@ -12,12 +11,13 @@ Code History:
     - 2024-10-06: Initial creation.
     - 2024-10-06: Added pagination handling and improved domain extraction.
     - 2024-10-06: Updated pagination to handle Traefik's non-standard implementation.
+    - 2024-10-06: Modified get_tls_domains to map domains to router info.
 
 """
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 
@@ -46,7 +46,7 @@ class TraefikAPI:
                 response.raise_for_status()
                 routers.extend(response.json())
                 x_next_page = response.headers.get('X-Next-Page')
-                # Set next page if x_next_page is set and it's greate than the current page
+                # Check if there is another page and it is greater than the current page
                 if x_next_page and int(x_next_page) > page:
                     page = int(x_next_page)
                 else:
@@ -56,17 +56,25 @@ class TraefikAPI:
                 break
         return routers
 
-    def get_tls_domains(self) -> List[str]:
-        """Get domains from routers that have TLS configured."""
+    def get_tls_domains(self) -> Dict[str, List[Dict[str, str]]]:
+        """Get domains from routers that have TLS configured.
+
+        Returns:
+            A dictionary mapping domains to a list of router info dictionaries, each containing 'name' and 'service'.
+        """
         routers = self.get_routers()
-        domains = set()
+        domains_map: Dict[str, List[Dict[str, str]]] = {}
         for router in routers:
             if 'tls' in router:
                 rule = router.get('rule', '')
+                router_name = router.get('name', 'Unknown')
+                service = router.get('service', 'Unknown')
                 # Parse rule to extract domains
                 extracted_domains = self.extract_domains_from_rule(rule)
-                domains.update(extracted_domains)
-        return list(domains)
+                for domain in extracted_domains:
+                    domain_info = {'name': router_name, 'service': service}
+                    domains_map.setdefault(domain, []).append(domain_info)
+        return domains_map
 
     @staticmethod
     def extract_domains_from_rule(rule: str) -> List[str]:

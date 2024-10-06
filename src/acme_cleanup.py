@@ -17,6 +17,7 @@ Code History:
     - 2024-10-06: Implemented Traefik certificate in-use checking.
     - 2024-10-06: Improved pagination handling and in-use domain matching.
     - 2024-10-06: Added unsatisfied certificates table to report.
+    - 2024-10-06: Included router name and service in unsatisfied domains report.
 
 """
 
@@ -75,9 +76,9 @@ class AcmeCleaner:
         self.unused_certs: List[Dict[str, Any]] = []
         self.used_certs: List[Dict[str, Any]] = []
         self.certs_to_remove: List[Dict[str, Any]] = []
-        self.in_use_domains: List[str] = []
+        self.in_use_domains: Dict[str, List[Dict[str, str]]] = {}
         self.certificate_domains: Set[str] = set()
-        self.unsatisfied_domains: List[str] = []
+        self.unsatisfied_domains: Dict[str, List[Dict[str, str]]] = {}
 
     @staticmethod
     def str_to_bool(value: str) -> bool:
@@ -144,7 +145,7 @@ class AcmeCleaner:
         """Analyse certificates in the acme.json file."""
         logging.info('Analysing certificates in acme.json')
         now = datetime.now(timezone.utc)
-        in_use_domains_set = set(self.in_use_domains)
+        in_use_domains_set = set(self.in_use_domains.keys())
         for resolver_name, resolver in self.acme_data.items():
             certificates = resolver.get('Certificates', [])
             for cert_entry in certificates:
@@ -193,8 +194,10 @@ class AcmeCleaner:
                     cert_entry['in_use'] = False
                     self.invalid_certs.append(cert_entry)
         # Identify unsatisfied domains
-        self.unsatisfied_domains = sorted(
-            list(in_use_domains_set - self.certificate_domains))
+        unsatisfied_domains_set = in_use_domains_set - self.certificate_domains
+        self.unsatisfied_domains = {
+            domain: self.in_use_domains[domain] for domain in unsatisfied_domains_set
+        }
         logging.info(
             f'Found {len(self.unsatisfied_domains)} unsatisfied domains')
 
@@ -266,10 +269,15 @@ class AcmeCleaner:
                 '## Domains Defined in Traefik Without Matching Certificates\n')
             report_lines.append(
                 'The following domains are used in Traefik routers with TLS but do not have corresponding certificates in acme.json:\n')
-            report_lines.append('| Domain |')
-            report_lines.append('|--------|')
-            for domain in self.unsatisfied_domains:
-                report_lines.append(f'| {domain} |')
+            report_lines.append('| Domain | Routers | Services |')
+            report_lines.append('|--------|---------|----------|')
+            for domain, routers_info in self.unsatisfied_domains.items():
+                router_names = ', '.join(
+                    {info['name'] for info in routers_info})
+                services = ', '.join({info['service']
+                                     for info in routers_info})
+                report_lines.append(
+                    f'| {domain} | {router_names} | {services} |')
             report_lines.append('\n')
         # Group certificates by resolver
         resolvers: Dict[str, List[Dict[str, Any]]] = {}
