@@ -8,16 +8,17 @@ Author:
     Troy Kelly <troy@aperim.com>
 
 Code History:
-    - 2024-10-06: Initial creation.
-    - 2024-10-06: Added pagination handling and improved domain extraction.
-    - 2024-10-06: Updated pagination to handle Traefik's non-standard implementation.
-    - 2024-10-06: Modified get_tls_domains to map domains to router info.
+    - 2023-10-06: Initial creation.
+    - 2023-10-06: Added pagination handling and improved domain extraction.
+    - 2023-10-06: Updated pagination to handle Traefik's non-standard implementation.
+    - 2023-10-06: Modified get_tls_domains to map domains to router info.
+    - 2023-10-06: Added get_tls_domain_sets method.
 
 """
 
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 import requests
 
@@ -44,37 +45,35 @@ class TraefikAPI:
             try:
                 response = self.session.get(url, params=params, timeout=10)
                 response.raise_for_status()
-                routers.extend(response.json())
-                x_next_page = response.headers.get('X-Next-Page')
-                # Check if there is another page and it is greater than the current page
-                if x_next_page and int(x_next_page) > page:
-                    page = int(x_next_page)
-                else:
+                page_data = response.json()
+                # Check if data is empty
+                if not page_data:
                     break
+                routers.extend(page_data)
+                # Traefik's pagination may not provide Next-Page header
+                if len(page_data) < per_page:
+                    break
+                page += 1
             except requests.RequestException as e:
                 logging.error(f'Error fetching routers from Traefik API: {e}')
                 break
         return routers
 
-    def get_tls_domains(self) -> Dict[str, List[Dict[str, str]]]:
-        """Get domains from routers that have TLS configured.
+    def get_tls_domain_sets(self) -> List[Set[str]]:
+        """Get sets of domains from routers that have TLS configured.
 
         Returns:
-            A dictionary mapping domains to a list of router info dictionaries, each containing 'name' and 'service'.
+            A list of sets, each containing the domains used in a router's rule.
         """
         routers = self.get_routers()
-        domains_map: Dict[str, List[Dict[str, str]]] = {}
+        domain_sets = []
         for router in routers:
             if 'tls' in router:
                 rule = router.get('rule', '')
-                router_name = router.get('name', 'Unknown')
-                service = router.get('service', 'Unknown')
-                # Parse rule to extract domains
-                extracted_domains = self.extract_domains_from_rule(rule)
-                for domain in extracted_domains:
-                    domain_info = {'name': router_name, 'service': service}
-                    domains_map.setdefault(domain, []).append(domain_info)
-        return domains_map
+                domains = self.extract_domains_from_rule(rule)
+                if domains:
+                    domain_sets.append(set(domains))
+        return domain_sets
 
     @staticmethod
     def extract_domains_from_rule(rule: str) -> List[str]:
@@ -89,9 +88,11 @@ class TraefikAPI:
         domains = []
         # Remove any negations and path prefixes/suffixes
         rule = re.sub(r'!\s*PathPrefix\([^\)]*\)', '', rule)
-        # Find all Host(`domain`) patterns
-        host_matches = re.findall(r'Host\((`[^`]+`(?:,\s*`[^`]+`)*)\)', rule)
-        for match in host_matches:
+        # Find all Host(`domain`), HostSNI(`domain`), and HostRegexp(`domain`) patterns
+        host_pattern = re.compile(
+            r'(Host|HostSNI|HostRegexp)\((`[^`]+`(?:,\s*`[^`]+`)*)\)')
+        matches = host_pattern.findall(rule)
+        for _, match in matches:
             # Extract multiple hosts if present
             hosts = re.findall(r'`([^`]+)`', match)
             domains.extend(hosts)

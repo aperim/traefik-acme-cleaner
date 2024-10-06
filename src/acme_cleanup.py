@@ -10,15 +10,16 @@ Author:
     Troy Kelly <troy@aperim.com>
 
 Code History:
-    - 2024-10-06: Initial creation.
-    - 2024-10-06: Fixed certificate decoding issue.
-    - 2024-10-06: Resolved DeprecationWarning for datetime.utcnow().
-    - 2024-10-06: Added markdown report generation functionality.
-    - 2024-10-06: Implemented Traefik certificate in-use checking.
-    - 2024-10-06: Improved pagination handling and in-use domain matching.
-    - 2024-10-06: Added unsatisfied certificates table to report.
-    - 2024-10-06: Included router name and service in unsatisfied domains report.
-    - 2024-10-06: Resolved JSON serialization error by avoiding modification of acme_data.
+    - 2023-10-06: Initial creation.
+    - 2023-10-06: Fixed certificate decoding issue.
+    - 2023-10-06: Resolved DeprecationWarning for datetime.utcnow().
+    - 2023-10-06: Added markdown report generation functionality.
+    - 2023-10-06: Implemented Traefik certificate in-use checking.
+    - 2023-10-06: Improved pagination handling and in-use domain matching.
+    - 2023-10-06: Added unsatisfied certificates table to report.
+    - 2023-10-06: Included router name and service in unsatisfied domains report.
+    - 2023-10-06: Resolved JSON serialization error by avoiding modification of acme_data.
+    - 2023-10-06: Updated in-use domain matching to consider entire domain sets.
 
 """
 
@@ -32,7 +33,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Set
 
 import requests
 from OpenSSL import crypto
@@ -78,9 +79,9 @@ class AcmeCleaner:
         self.acme_data: Dict[str, Any] = {}
         self.analyzed_certs: List[Dict[str, Any]] = []
         self.certs_to_remove: List[Dict[str, Any]] = []
-        self.in_use_domains: Dict[str, List[Dict[str, str]]] = {}
+        self.in_use_domain_sets: List[Set[str]] = []
         self.certificate_domains: Set[str] = set()
-        self.unsatisfied_domains: Dict[str, List[Dict[str, str]]] = {}
+        self.unsatisfied_domains: Set[str] = set()
 
     @staticmethod
     def str_to_bool(value: str) -> bool:
@@ -122,15 +123,16 @@ class AcmeCleaner:
             sys.exit(1)
 
     def load_in_use_domains(self) -> None:
-        """Load in-use domains from Traefik API."""
-        logging.info('Fetching in-use domains from Traefik API')
+        """Load in-use domain sets from Traefik API."""
+        logging.info('Fetching in-use domain sets from Traefik API')
         traefik_api = TraefikAPI(
             base_url=self.dashboard_url,
             username=self.dashboard_username,
             password=self.dashboard_password
         )
-        self.in_use_domains = traefik_api.get_tls_domains()
-        logging.info(f'Found {len(self.in_use_domains)} in-use domains')
+        self.in_use_domain_sets = traefik_api.get_tls_domain_sets()
+        logging.info(
+            f'Found {len(self.in_use_domain_sets)} in-use domain sets')
 
     def load_acme_file(self) -> None:
         """Load and parse the acme.json file."""
@@ -149,7 +151,6 @@ class AcmeCleaner:
         """Analyse certificates in the acme.json file."""
         logging.info('Analysing certificates in acme.json')
         now = datetime.now(timezone.utc)
-        in_use_domains_set = set(self.in_use_domains.keys())
         for resolver_name, resolver in self.acme_data.items():
             certificates = resolver.get('Certificates', [])
             for cert_entry in certificates:
@@ -192,11 +193,11 @@ class AcmeCleaner:
                         analysis['status'] = 'expired'
                     else:
                         analysis['status'] = 'valid'
-                    # Determine if certificate is in use
-                    domains_in_use = all(
-                        domain in in_use_domains_set for domain in all_domains
+                    # Determine if certificate is in use by exact domain set matching
+                    cert_domains_set = set(all_domains)
+                    analysis['in_use'] = any(
+                        cert_domains_set == in_use_set for in_use_set in self.in_use_domain_sets
                     )
-                    analysis['in_use'] = domains_in_use
                 except (crypto.Error, ValueError, UnicodeDecodeError) as e:
                     logging.error(
                         f'Invalid certificate for domain {main_domain}: {e}'
@@ -205,10 +206,9 @@ class AcmeCleaner:
                     analysis['in_use'] = False
                 self.analyzed_certs.append(analysis)
         # Identify unsatisfied domains
+        in_use_domains_set = set().union(*self.in_use_domain_sets)
         unsatisfied_domains_set = in_use_domains_set - self.certificate_domains
-        self.unsatisfied_domains = {
-            domain: self.in_use_domains[domain] for domain in unsatisfied_domains_set
-        }
+        self.unsatisfied_domains = unsatisfied_domains_set
         logging.info(
             f'Found {len(self.unsatisfied_domains)} unsatisfied domains')
 
@@ -314,16 +314,10 @@ class AcmeCleaner:
             report_lines.append(
                 'The following domains are used in Traefik routers with TLS but do not have corresponding certificates in acme.json:\n'
             )
-            report_lines.append('| Domain | Routers | Services |')
-            report_lines.append('|--------|---------|----------|')
-            for domain, routers_info in self.unsatisfied_domains.items():
-                router_names = ', '.join(
-                    {info['name'] for info in routers_info})
-                services = ', '.join({info['service']
-                                     for info in routers_info})
-                report_lines.append(
-                    f'| {domain} | {router_names} | {services} |'
-                )
+            report_lines.append('| Domain |')
+            report_lines.append('|--------|')
+            for domain in sorted(self.unsatisfied_domains):
+                report_lines.append(f'| {domain} |')
             report_lines.append('\n')
         # Group certificates by resolver
         resolvers: Dict[str, List[Dict[str, Any]]] = {}
