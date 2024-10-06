@@ -246,9 +246,26 @@ class AcmeCleaner:
         # Write the updated acme.json
         temp_path = self.acme_file_path.with_suffix('.tmp')
         try:
+            # Get the original file's permissions and ownership
+            stat_info = os.stat(self.acme_file_path)
+            original_mode = stat_info.st_mode
+            original_uid = stat_info.st_uid
+            original_gid = stat_info.st_gid
+            # Write the updated data to the temporary file
             with temp_path.open('w', encoding='utf-8') as file:
                 json.dump(self.acme_data, file, indent=2)
+            # Replace the original file with the temporary file
             temp_path.replace(self.acme_file_path)
+            # Apply the original permissions to the new file
+            os.chmod(self.acme_file_path, original_mode)
+            # Apply the original ownership to the new file
+            try:
+                os.chown(self.acme_file_path, original_uid, original_gid)
+            except PermissionError:
+                logging.warning(
+                    'PermissionError: Could not change owner of the acme.json file. '
+                    'You might need additional permissions to change file ownership.'
+                )
             logging.info(
                 f'acme.json file updated successfully at {self.acme_file_path}'
             )
