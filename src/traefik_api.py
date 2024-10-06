@@ -10,12 +10,13 @@ Author:
 
 Code History:
     - 2024-10-06: Initial creation.
+    - 2024-10-06: Added pagination handling and improved domain extraction.
 
 """
 
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -31,16 +32,20 @@ class TraefikAPI:
         self.session.auth = self.auth
 
     def get_routers(self) -> List[Dict[str, Any]]:
-        """Fetch the list of routers from Traefik API."""
+        """Fetch the list of routers from the Traefik API with pagination support."""
+        routers = []
         url = f'{self.base_url}/api/http/routers'
-        logging.info(f'Fetching routers from {url}')
-        try:
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logging.error(f'Error fetching routers from Traefik API: {e}')
-            return []
+        while url:
+            logging.info(f'Fetching routers from {url}')
+            try:
+                response = self.session.get(url, timeout=10)
+                response.raise_for_status()
+                routers.extend(response.json())
+                url = response.headers.get('X-Next-Page')
+            except requests.RequestException as e:
+                logging.error(f'Error fetching routers from Traefik API: {e}')
+                break
+        return routers
 
     def get_tls_domains(self) -> List[str]:
         """Get domains from routers that have TLS configured."""
@@ -56,9 +61,21 @@ class TraefikAPI:
 
     @staticmethod
     def extract_domains_from_rule(rule: str) -> List[str]:
-        """Extract domains from a Traefik router rule."""
+        """Extract domains from a Traefik router rule.
+
+        Args:
+            rule: The routing rule from a Traefik router.
+
+        Returns:
+            A list of domain names extracted from the rule.
+        """
         domains = []
-        # Example rule: "Host(`example.com`) || Host(`www.example.com`)"
-        matches = re.findall(r"Host\(`([^`]+)`\)", rule)
-        domains.extend(matches)
+        # Remove any negations and path prefixes/suffixes
+        rule = re.sub(r'!\s*PathPrefix\([^\)]*\)', '', rule)
+        # Find all Host(`domain`) patterns
+        host_matches = re.findall(r'Host\((`[^`]+`(?:,\s*`[^`]+`)*)\)', rule)
+        for match in host_matches:
+            # Extract multiple hosts if present
+            hosts = re.findall(r'`([^`]+)`', match)
+            domains.extend(hosts)
         return domains

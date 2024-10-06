@@ -15,6 +15,7 @@ Code History:
     - 2024-10-06: Resolved DeprecationWarning for datetime.utcnow().
     - 2024-10-06: Added markdown report generation functionality.
     - 2024-10-06: Implemented Traefik certificate in-use checking.
+    - 2024-10-06: Improved pagination handling and in-use domain matching.
 
 """
 
@@ -140,17 +141,19 @@ class AcmeCleaner:
         """Analyse certificates in the acme.json file."""
         logging.info('Analysing certificates in acme.json')
         now = datetime.now(timezone.utc)
+        in_use_domains_set = set(self.in_use_domains)
         for resolver_name, resolver in self.acme_data.items():
             certificates = resolver.get('Certificates', [])
             for cert_entry in certificates:
                 cert_entry['resolver_name'] = resolver_name
-                cert_pem_encoded = cert_entry.get('certificate')
                 domain_info = cert_entry.get('domain', {})
                 main_domain = domain_info.get('main', 'Unknown')
                 sans = domain_info.get('sans', [])
                 all_domains = [main_domain] + sans
+                cert_entry['all_domains'] = all_domains
                 try:
                     # Base64-decode the certificate
+                    cert_pem_encoded = cert_entry.get('certificate')
                     cert_pem_bytes = base64.b64decode(cert_pem_encoded)
                     # Decode to string
                     cert_pem = cert_pem_bytes.decode('utf-8')
@@ -172,10 +175,10 @@ class AcmeCleaner:
                         cert_entry['status'] = 'valid'
                         self.valid_certs.append(cert_entry)
                     # Determine if certificate is in use
-                    in_use = any(
-                        domain in self.in_use_domains for domain in all_domains)
-                    cert_entry['in_use'] = in_use
-                    if in_use:
+                    domains_in_use = all(
+                        domain in in_use_domains_set for domain in all_domains)
+                    cert_entry['in_use'] = domains_in_use
+                    if domains_in_use:
                         self.used_certs.append(cert_entry)
                     else:
                         self.unused_certs.append(cert_entry)
@@ -237,7 +240,7 @@ class AcmeCleaner:
         total_certs = len(self.valid_certs) + \
             len(self.invalid_certs) + len(self.expired_certs)
         total_domains = sum(
-            len(cert.get('domain', {}).get('sans', [])) + 1
+            len(cert.get('all_domains', []))
             for cert in self.valid_certs + self.invalid_certs + self.expired_certs
         )
         report_lines.append('## Summary\n')
