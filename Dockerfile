@@ -27,7 +27,6 @@ ARG BUILD_DATE
 ARG VCS_REF
 ARG VERSION
 ARG REPO_URL
-ARG ODOO_MAJOR_VERSION=17
 
 # Set labels
 LABEL org.opencontainers.image.created=$BUILD_DATE \
