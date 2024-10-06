@@ -16,6 +16,7 @@ Code History:
     - 2024-10-06: Added markdown report generation functionality.
     - 2024-10-06: Implemented Traefik certificate in-use checking.
     - 2024-10-06: Improved pagination handling and in-use domain matching.
+    - 2024-10-06: Added unsatisfied certificates table to report.
 
 """
 
@@ -29,7 +30,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 import requests
 from OpenSSL import crypto
@@ -75,6 +76,8 @@ class AcmeCleaner:
         self.used_certs: List[Dict[str, Any]] = []
         self.certs_to_remove: List[Dict[str, Any]] = []
         self.in_use_domains: List[str] = []
+        self.certificate_domains: Set[str] = set()
+        self.unsatisfied_domains: List[str] = []
 
     @staticmethod
     def str_to_bool(value: str) -> bool:
@@ -151,6 +154,7 @@ class AcmeCleaner:
                 sans = domain_info.get('sans', [])
                 all_domains = [main_domain] + sans
                 cert_entry['all_domains'] = all_domains
+                self.certificate_domains.update(all_domains)
                 try:
                     # Base64-decode the certificate
                     cert_pem_encoded = cert_entry.get('certificate')
@@ -188,6 +192,11 @@ class AcmeCleaner:
                     cert_entry['status'] = 'invalid'
                     cert_entry['in_use'] = False
                     self.invalid_certs.append(cert_entry)
+        # Identify unsatisfied domains
+        self.unsatisfied_domains = sorted(
+            list(in_use_domains_set - self.certificate_domains))
+        logging.info(
+            f'Found {len(self.unsatisfied_domains)} unsatisfied domains')
 
     def prepare_removal_list(self) -> None:
         """Prepare the list of certificates to be removed."""
@@ -239,10 +248,7 @@ class AcmeCleaner:
             timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")}\n')
         total_certs = len(self.valid_certs) + \
             len(self.invalid_certs) + len(self.expired_certs)
-        total_domains = sum(
-            len(cert.get('all_domains', []))
-            for cert in self.valid_certs + self.invalid_certs + self.expired_certs
-        )
+        total_domains = len(self.certificate_domains)
         report_lines.append('## Summary\n')
         report_lines.append(f'- **Total Certificates**: {total_certs}')
         report_lines.append(f'- **Total Domains**: {total_domains}')
@@ -254,6 +260,17 @@ class AcmeCleaner:
             f'- **Expired Certificates**: {len(self.expired_certs)}')
         report_lines.append(
             f'- **Unused Certificates**: {len(self.unused_certs)}\n')
+        # Add table for unsatisfied domains
+        if self.unsatisfied_domains:
+            report_lines.append(
+                '## Domains Defined in Traefik Without Matching Certificates\n')
+            report_lines.append(
+                'The following domains are used in Traefik routers with TLS but do not have corresponding certificates in acme.json:\n')
+            report_lines.append('| Domain |')
+            report_lines.append('|--------|')
+            for domain in self.unsatisfied_domains:
+                report_lines.append(f'| {domain} |')
+            report_lines.append('\n')
         # Group certificates by resolver
         resolvers: Dict[str, List[Dict[str, Any]]] = {}
         for cert_list in [self.valid_certs, self.invalid_certs, self.expired_certs]:

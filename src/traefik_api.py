@@ -11,6 +11,7 @@ Author:
 Code History:
     - 2024-10-06: Initial creation.
     - 2024-10-06: Added pagination handling and improved domain extraction.
+    - 2024-10-06: Updated pagination to handle Traefik's non-standard implementation.
 
 """
 
@@ -34,14 +35,22 @@ class TraefikAPI:
     def get_routers(self) -> List[Dict[str, Any]]:
         """Fetch the list of routers from the Traefik API with pagination support."""
         routers = []
-        url = f'{self.base_url}/api/http/routers'
-        while url:
-            logging.info(f'Fetching routers from {url}')
+        page = 1
+        per_page = 100  # Maximum number of results per page
+        while True:
+            params = {'page': page, 'per_page': per_page}
+            url = f'{self.base_url}/api/http/routers'
+            logging.info(f'Fetching routers from {url} with params {params}')
             try:
-                response = self.session.get(url, timeout=10)
+                response = self.session.get(url, params=params, timeout=10)
                 response.raise_for_status()
                 routers.extend(response.json())
-                url = response.headers.get('X-Next-Page')
+                x_next_page = response.headers.get('X-Next-Page')
+                # Set next page if x_next_page is set and it's greate than the current page
+                if x_next_page and int(x_next_page) > page:
+                    page = int(x_next_page)
+                else:
+                    break
             except requests.RequestException as e:
                 logging.error(f'Error fetching routers from Traefik API: {e}')
                 break
