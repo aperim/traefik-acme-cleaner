@@ -6,9 +6,16 @@ COPY requirements.txt /tmp/requirements.txt
 
 RUN apk add --no-cache \
     shadow \
-    su-exec && \
+    su-exec \
+    libressl-dev \
+    musl-dev \
+    libffi-dev && \
     pip install -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt && \
+    apk del \
+    libressl-dev \
+    musl-dev \
+    libffi-dev && \
     mkdir -p /certificates && \
     addgroup -g 1000 cleanup && \
     adduser -D -H -G cleanup -u 1000 cleanup && \
