@@ -9,7 +9,7 @@ services:
       - TRAEFIK_DASHBOARD_PASSWORD
       - ACME_CLEANUP_UNUSED
       - ACME_CLEANUP_DOIT
-      - TRAEFIK_ACME_FILE=${TRAEFIK_ACME_FILE:-"/certificates/acme.json"}
+      - TRAEFIK_ACME_FILE=${TRAEFIK_ACME_FILE:-/certificates/acme.json}
       - CLEANUP_REPORT=${CLEANUP_REPORT:-/certificates/REPORT.md}
     deploy:
       mode: global

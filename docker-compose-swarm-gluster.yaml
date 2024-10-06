@@ -15,6 +15,16 @@ services:
       mode: global
       restart_policy:
         delay: 24h
+      placement:
+        constraints:
+          - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
 
 volumes:
   traefik-public-certificates:
