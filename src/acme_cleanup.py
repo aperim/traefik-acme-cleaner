@@ -14,6 +14,7 @@ Code History:
     - 2024-10-06: Fixed certificate decoding issue.
     - 2024-10-06: Resolved DeprecationWarning for datetime.utcnow().
     - 2024-10-06: Added markdown report generation functionality.
+    - 2024-10-06: Implemented Traefik certificate in-use checking.
 
 """
 
@@ -31,6 +32,8 @@ from typing import Any, Dict, List
 
 import requests
 from OpenSSL import crypto
+
+from traefik_api import TraefikAPI  # Import the Traefik API module
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -52,7 +55,8 @@ class AcmeCleaner:
 
     def __init__(self, args: argparse.Namespace) -> None:
         """Initialise the AcmeCleaner with command-line arguments."""
-        self.acme_file_path = Path(os.environ.get('TRAEFIK_ACME_FILE', 'acme.json'))
+        self.acme_file_path = Path(os.environ.get(
+            'TRAEFIK_ACME_FILE', 'acme.json'))
         self.dashboard_url = os.environ.get('TRAEFIK_DASHBOARD_URL')
         self.dashboard_username = os.environ.get('TRAEFIK_DASHBOARD_USERNAME')
         self.dashboard_password = os.environ.get('TRAEFIK_DASHBOARD_PASSWORD')
@@ -69,6 +73,7 @@ class AcmeCleaner:
         self.unused_certs: List[Dict[str, Any]] = []
         self.used_certs: List[Dict[str, Any]] = []
         self.certs_to_remove: List[Dict[str, Any]] = []
+        self.in_use_domains: List[str] = []
 
     @staticmethod
     def str_to_bool(value: str) -> bool:
@@ -77,12 +82,14 @@ class AcmeCleaner:
 
     def check_acme_file(self) -> None:
         """Ensure that the acme.json file exists and is readable and writable."""
-        logging.info(f'Checking if acme.json file exists at {self.acme_file_path}')
+        logging.info(f'Checking if acme.json file exists at {
+                     self.acme_file_path}')
         if not self.acme_file_path.exists():
             logging.error(f'ACME file not found: {self.acme_file_path}')
             sys.exit(1)
         if not os.access(self.acme_file_path, os.R_OK | os.W_OK):
-            logging.error(f'ACME file is not readable and writable: {self.acme_file_path}')
+            logging.error(f'ACME file is not readable and writable: {
+                          self.acme_file_path}')
             sys.exit(1)
 
     def check_dashboard_access(self) -> None:
@@ -98,11 +105,23 @@ class AcmeCleaner:
                 timeout=10
             )
             if response.status_code != 200:
-                logging.error(f'Failed to access Traefik dashboard, status code: {response.status_code}')
+                logging.error(f'Failed to access Traefik dashboard, status code: {
+                              response.status_code}')
                 sys.exit(1)
         except requests.RequestException as e:
             logging.error(f'Error accessing Traefik dashboard: {e}')
             sys.exit(1)
+
+    def load_in_use_domains(self) -> None:
+        """Load in-use domains from Traefik API."""
+        logging.info('Fetching in-use domains from Traefik API')
+        traefik_api = TraefikAPI(
+            base_url=self.dashboard_url,
+            username=self.dashboard_username,
+            password=self.dashboard_password
+        )
+        self.in_use_domains = traefik_api.get_tls_domains()
+        logging.info(f'Found {len(self.in_use_domains)} in-use domains')
 
     def load_acme_file(self) -> None:
         """Load and parse the acme.json file."""
@@ -129,19 +148,22 @@ class AcmeCleaner:
                 domain_info = cert_entry.get('domain', {})
                 main_domain = domain_info.get('main', 'Unknown')
                 sans = domain_info.get('sans', [])
+                all_domains = [main_domain] + sans
                 try:
                     # Base64-decode the certificate
                     cert_pem_bytes = base64.b64decode(cert_pem_encoded)
                     # Decode to string
                     cert_pem = cert_pem_bytes.decode('utf-8')
                     # Load the certificate
-                    x509 = crypto.load_certificate(crypto.FILETYPE_PEM, cert_pem)
+                    x509 = crypto.load_certificate(
+                        crypto.FILETYPE_PEM, cert_pem)
                     not_after = datetime.strptime(
                         x509.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ'
                     ).replace(tzinfo=timezone.utc)
                     days_until_expiry = (not_after - now).days
                     cert_entry['not_after'] = not_after
                     cert_entry['days_until_expiry'] = days_until_expiry
+                    # Determine if certificate is expired
                     if not_after < now:
                         logging.info(f'Certificate expired: {main_domain}')
                         cert_entry['status'] = 'expired'
@@ -149,9 +171,19 @@ class AcmeCleaner:
                     else:
                         cert_entry['status'] = 'valid'
                         self.valid_certs.append(cert_entry)
+                    # Determine if certificate is in use
+                    in_use = any(
+                        domain in self.in_use_domains for domain in all_domains)
+                    cert_entry['in_use'] = in_use
+                    if in_use:
+                        self.used_certs.append(cert_entry)
+                    else:
+                        self.unused_certs.append(cert_entry)
                 except (crypto.Error, ValueError, UnicodeDecodeError) as e:
-                    logging.error(f'Invalid certificate for domain {main_domain}: {e}')
+                    logging.error(f'Invalid certificate for domain {
+                                  main_domain}: {e}')
                     cert_entry['status'] = 'invalid'
+                    cert_entry['in_use'] = False
                     self.invalid_certs.append(cert_entry)
 
     def prepare_removal_list(self) -> None:
@@ -159,9 +191,10 @@ class AcmeCleaner:
         logging.info('Preparing list of certificates for removal')
         self.certs_to_remove = self.invalid_certs + self.expired_certs
         if self.include_unused:
-            # Placeholder for unused certificates logic
-            self.certs_to_remove += self.unused_certs
-        logging.info(f'Certificates marked for removal: {len(self.certs_to_remove)}')
+            self.certs_to_remove += [
+                cert for cert in self.unused_certs if cert not in self.certs_to_remove]
+        logging.info(f'Certificates marked for removal: {
+                     len(self.certs_to_remove)}')
 
     def perform_cleanup(self) -> None:
         """Perform the cleanup by removing the certificates."""
@@ -172,7 +205,8 @@ class AcmeCleaner:
             logging.info('No certificates to remove')
             return
         logging.info('Performing cleanup')
-        backup_path = self.acme_file_path.with_name(f'{self.acme_file_path.name}.backup')
+        backup_path = self.acme_file_path.with_name(
+            f'{self.acme_file_path.name}.backup')
         shutil.copy2(self.acme_file_path, backup_path)
         logging.info(f'Backup of acme.json created at {backup_path}')
         # Remove certificates from the acme_data
@@ -187,7 +221,8 @@ class AcmeCleaner:
             with temp_path.open('w', encoding='utf-8') as file:
                 json.dump(self.acme_data, file, indent=2)
             temp_path.replace(self.acme_file_path)
-            logging.info(f'acme.json file updated successfully at {self.acme_file_path}')
+            logging.info(f'acme.json file updated successfully at {
+                         self.acme_file_path}')
         except Exception as e:
             logging.error(f'Failed to update acme.json file: {e}')
             sys.exit(1)
@@ -197,8 +232,10 @@ class AcmeCleaner:
         logging.info(f'Generating markdown report at {self.report_path}')
         report_lines = []
         report_lines.append('# ACME Certificate Cleanup Report\n')
-        report_lines.append(f'Generated on {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")}\n')
-        total_certs = len(self.valid_certs) + len(self.invalid_certs) + len(self.expired_certs)
+        report_lines.append(f'Generated on {datetime.now(
+            timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")}\n')
+        total_certs = len(self.valid_certs) + \
+            len(self.invalid_certs) + len(self.expired_certs)
         total_domains = sum(
             len(cert.get('domain', {}).get('sans', [])) + 1
             for cert in self.valid_certs + self.invalid_certs + self.expired_certs
@@ -206,10 +243,14 @@ class AcmeCleaner:
         report_lines.append('## Summary\n')
         report_lines.append(f'- **Total Certificates**: {total_certs}')
         report_lines.append(f'- **Total Domains**: {total_domains}')
-        report_lines.append(f'- **Valid Certificates**: {len(self.valid_certs)}')
-        report_lines.append(f'- **Invalid Certificates**: {len(self.invalid_certs)}')
-        report_lines.append(f'- **Expired Certificates**: {len(self.expired_certs)}')
-        report_lines.append(f'- **Unused Certificates**: {len(self.unused_certs)}\n')
+        report_lines.append(
+            f'- **Valid Certificates**: {len(self.valid_certs)}')
+        report_lines.append(
+            f'- **Invalid Certificates**: {len(self.invalid_certs)}')
+        report_lines.append(
+            f'- **Expired Certificates**: {len(self.expired_certs)}')
+        report_lines.append(
+            f'- **Unused Certificates**: {len(self.unused_certs)}\n')
         # Group certificates by resolver
         resolvers: Dict[str, List[Dict[str, Any]]] = {}
         for cert_list in [self.valid_certs, self.invalid_certs, self.expired_certs]:
@@ -218,8 +259,10 @@ class AcmeCleaner:
                 resolvers.setdefault(resolver_name, []).append(cert)
         for resolver_name, certs in resolvers.items():
             report_lines.append(f'## Resolver: {resolver_name}\n')
-            report_lines.append('| Primary Domain | Additional Domains | Expiry Date | Days Until Expiry | In Use | Deleted |')
-            report_lines.append('|----------------|--------------------|-------------|-------------------|--------|---------|')
+            report_lines.append(
+                '| Primary Domain | Additional Domains | Expiry Date | Days Until Expiry | In Use | Deleted |')
+            report_lines.append(
+                '|----------------|--------------------|-------------|-------------------|--------|---------|')
             for cert in certs:
                 domain_info = cert.get('domain', {})
                 main_domain = domain_info.get('main', 'Unknown')
@@ -238,7 +281,7 @@ class AcmeCleaner:
                 else:
                     days_until_expiry_display = str(days_until_expiry)
                 deleted = 'Yes' if cert in self.certs_to_remove else ''
-                in_use = ''  # Placeholder for future implementation
+                in_use = 'Yes' if cert.get('in_use', False) else 'No'
                 report_lines.append(
                     f'| {main_domain} | {", ".join(sans)} | {expiry_date} | '
                     f'{days_until_expiry_display} | {in_use} | {deleted} |'
@@ -247,7 +290,8 @@ class AcmeCleaner:
         try:
             with self.report_path.open('w', encoding='utf-8') as report_file:
                 report_file.write('\n'.join(report_lines))
-            logging.info(f'Report generated successfully at {self.report_path}')
+            logging.info(f'Report generated successfully at {
+                         self.report_path}')
         except Exception as e:
             logging.error(f'Failed to write report file: {e}')
             sys.exit(1)
@@ -256,6 +300,7 @@ class AcmeCleaner:
         """Run the ACME certificate cleanup process."""
         self.check_acme_file()
         self.check_dashboard_access()
+        self.load_in_use_domains()
         self.load_acme_file()
         self.analyse_certificates()
         self.prepare_removal_list()
@@ -265,7 +310,8 @@ class AcmeCleaner:
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='ACME Certificate Cleanup Script')
+    parser = argparse.ArgumentParser(
+        description='ACME Certificate Cleanup Script')
     parser.add_argument('--include-unused', action='store_true',
                         help='Include unused certificates in the removal')
     parser.add_argument('--doit', action='store_true',
