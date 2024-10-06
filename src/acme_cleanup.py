@@ -10,10 +10,12 @@ Author:
 
 Code History:
     - 2024-10-06: Initial creation.
+    - 2024-10-06: Fixed certificate decoding issue.
 
 """
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -47,12 +49,15 @@ class AcmeCleaner:
 
     def __init__(self, args: argparse.Namespace) -> None:
         """Initialize the AcmeCleaner with command-line arguments."""
-        self.acme_file_path = Path(os.environ.get('TRAEFIK_ACME_FILE', 'acme.json'))
+        self.acme_file_path = Path(os.environ.get(
+            'TRAEFIK_ACME_FILE', 'acme.json'))
         self.dashboard_url = os.environ.get('TRAEFIK_DASHBOARD_URL')
         self.dashboard_username = os.environ.get('TRAEFIK_DASHBOARD_USERNAME')
         self.dashboard_password = os.environ.get('TRAEFIK_DASHBOARD_PASSWORD')
-        self.include_unused = args.include_unused or self.str_to_bool(os.environ.get('ACME_CLEANUP_UNUSED', 'false'))
-        self.doit = args.doit or self.str_to_bool(os.environ.get('ACME_CLEANUP_DOIT', 'false'))
+        self.include_unused = args.include_unused or self.str_to_bool(
+            os.environ.get('ACME_CLEANUP_UNUSED', 'false'))
+        self.doit = args.doit or self.str_to_bool(
+            os.environ.get('ACME_CLEANUP_DOIT', 'false'))
         self.acme_data: Dict[str, Any] = {}
         self.valid_certs: List[Dict[str, Any]] = []
         self.invalid_certs: List[Dict[str, Any]] = []
@@ -68,12 +73,14 @@ class AcmeCleaner:
 
     def check_acme_file(self) -> None:
         """Ensure that the acme.json file exists and is readable and writable."""
-        logging.info(f'Checking if acme.json file exists at {self.acme_file_path}')
+        logging.info(f'Checking if acme.json file exists at {
+                     self.acme_file_path}')
         if not self.acme_file_path.exists():
             logging.error(f'ACME file not found: {self.acme_file_path}')
             sys.exit(1)
         if not os.access(self.acme_file_path, os.R_OK | os.W_OK):
-            logging.error(f'ACME file is not readable and writable: {self.acme_file_path}')
+            logging.error(f'ACME file is not readable and writable: {
+                          self.acme_file_path}')
             sys.exit(1)
 
     def check_dashboard_access(self) -> None:
@@ -89,7 +96,8 @@ class AcmeCleaner:
                 timeout=10
             )
             if response.status_code != 200:
-                logging.error(f'Failed to access Traefik dashboard, status code: {response.status_code}')
+                logging.error(f'Failed to access Traefik dashboard, status code: {
+                              response.status_code}')
                 sys.exit(1)
         except requests.RequestException as e:
             logging.error(f'Error accessing Traefik dashboard: {e}')
@@ -111,14 +119,21 @@ class AcmeCleaner:
     def analyse_certificates(self) -> None:
         """Analyse certificates in the acme.json file."""
         logging.info('Analysing certificates in acme.json')
-        for resolver in self.acme_data.values():
+        for resolver_name, resolver in self.acme_data.items():
             certificates = resolver.get('Certificates', [])
+            valid_certs = []
             for cert_entry in certificates:
-                cert_pem = cert_entry.get('certificate')
+                cert_pem_encoded = cert_entry.get('certificate')
                 domain_info = cert_entry.get('domain', {})
-                main_domain = domain_info.get('main')
+                main_domain = domain_info.get('main', 'Unknown')
                 try:
-                    x509 = crypto.load_certificate(crypto.FILETYPE_PEM, cert_pem)
+                    # Base64-decode the certificate
+                    cert_pem_bytes = base64.b64decode(cert_pem_encoded)
+                    # Decode to string
+                    cert_pem = cert_pem_bytes.decode('utf-8')
+                    # Load the certificate
+                    x509 = crypto.load_certificate(
+                        crypto.FILETYPE_PEM, cert_pem)
                     not_after = datetime.strptime(
                         x509.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
                     if not_after < datetime.utcnow():
@@ -126,9 +141,13 @@ class AcmeCleaner:
                         self.expired_certs.append(cert_entry)
                     else:
                         self.valid_certs.append(cert_entry)
-                except crypto.Error as e:
-                    logging.error(f'Invalid certificate for domain {main_domain}: {e}')
+                        valid_certs.append(cert_entry)
+                except (crypto.Error, ValueError, UnicodeDecodeError) as e:
+                    logging.error(f'Invalid certificate for domain {
+                                  main_domain}: {e}')
                     self.invalid_certs.append(cert_entry)
+            # Update the resolver's certificates list
+            resolver['Certificates'] = valid_certs
 
     def prepare_removal_list(self) -> None:
         """Prepare the list of certificates to be removed."""
@@ -137,15 +156,20 @@ class AcmeCleaner:
         if self.include_unused:
             # Placeholder for unused certificates logic
             self.certs_to_remove += self.unused_certs
-        logging.info(f'Certificates marked for removal: {len(self.certs_to_remove)}')
+        logging.info(f'Certificates marked for removal: {
+                     len(self.certs_to_remove)}')
 
     def perform_cleanup(self) -> None:
         """Perform the cleanup by removing the certificates."""
         if not self.doit:
             logging.info('Simulation mode; no changes will be made')
             return
+        if not self.certs_to_remove:
+            logging.info('No certificates to remove')
+            return
         logging.info('Performing cleanup')
-        backup_path = self.acme_file_path.with_suffix('.backup')
+        backup_path = self.acme_file_path.with_name(
+            f'{self.acme_file_path.name}.backup')
         shutil.copy2(self.acme_file_path, backup_path)
         logging.info(f'Backup of acme.json created at {backup_path}')
         # Remove certificates from the acme_data
@@ -160,7 +184,8 @@ class AcmeCleaner:
             with temp_path.open('w', encoding='utf-8') as file:
                 json.dump(self.acme_data, file, indent=2)
             temp_path.replace(self.acme_file_path)
-            logging.info(f'acme.json file updated successfully at {self.acme_file_path}')
+            logging.info(f'acme.json file updated successfully at {
+                         self.acme_file_path}')
         except Exception as e:
             logging.error(f'Failed to update acme.json file: {e}')
             sys.exit(1)
@@ -177,7 +202,8 @@ class AcmeCleaner:
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='ACME Certificate Cleanup Script')
+    parser = argparse.ArgumentParser(
+        description='ACME Certificate Cleanup Script')
     parser.add_argument('--include-unused', action='store_true',
                         help='Include unused certificates in the removal')
     parser.add_argument('--doit', action='store_true',
