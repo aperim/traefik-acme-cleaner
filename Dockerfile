@@ -7,10 +7,10 @@ COPY requirements.txt /tmp/requirements.txt
 RUN apk add --no-cache \
     shadow \
     su-exec  && \
-    apk add --no-cache --virtual .build-deps gcc libffi-dev musl-dev libressl-dev && \
+    apk add --no-cache --virtual .build-deps gcc libffi-dev musl-dev libressl-dev cargo && \
     pip install -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt && \
-    apk del .build-deps gcc libffi-dev musl-dev libressl-dev && \
+    apk del .build-deps gcc libffi-dev musl-dev libressl-dev cargo && \
     mkdir -p /certificates && \
     addgroup -g 1000 cleanup && \
     adduser -D -H -G cleanup -u 1000 cleanup && \
